@@ -1,0 +1,41 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "C/C++ Launch in WSL",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "/mnt/d/SyncWork/CodeSpace/DTN/bondmscp/build/mscp",
+            "args": [
+                "-vvv", 
+                "-D", 
+                "eth3", 
+                "-P", 
+                "22", 
+                "/root/zipable.tar.1", 
+                "vtuser@10.0.0.210:c\\users\\vtuser\\leon1.t"
+            ],
+            "stopAtEntry": false,
+            "cwd": "/mnt/d/SyncWork/CodeSpace/DTN/bondmscp",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ],
+            "pipeTransport": {
+                "debuggerPath": "/usr/bin/gdb",
+                "pipeProgram": "wsl.exe",
+                "pipeArgs": [],
+                "pipeCwd": ""
+            },
+            "sourceFileMap": {
+                "/mnt/d": "d:\\"
+            }
+        }
+    ]
+}

@@ -15,6 +15,7 @@ sftp_session ssh_init_sftp_session(const char *sshdst, struct mscp_ssh_opts *opt
 void ssh_sftp_close(sftp_session sftp);
 
 #define sftp_ssh(sftp) (sftp)->session
+#define sftp_get_session(sftp) (sftp)->session
 #define sftp_get_ssh_error(sftp) ssh_get_error(sftp_ssh(sftp))
 
 #endif /* _SSH_H_ */

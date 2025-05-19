@@ -1,0 +1,51 @@
+cd build && cmake .. \
+	-DCMAKE_BUILD_TYPE=Release \
+	-DCMAKE_INSTALL_PREFIX=/usr/local
+-- Could NOT find NaCl (missing: NACL_LIBRARIES NACL_INCLUDE_DIRS) 
+-- Could NOT find ARGP (missing: ARGP_LIBRARIES) 
+-- Could NOT find Doxygen (missing: DOXYGEN_EXECUTABLE) 
+-- Threads_FOUND=TRUE
+-- ********************************************
+-- ********** libssh build options : **********
+-- zlib support: ON
+-- libgcrypt support: OFF
+-- libmbedTLS support: OFF
+-- libnacl support: OFF
+-- SFTP support: ON
+-- Server support : OFF
+-- GSSAPI support : ON
+-- GEX support : ON
+-- Support insecure none cipher and MAC : OFF
+-- Pcap debugging support : ON
+-- Build shared library: OFF
+-- Unit testing: OFF
+-- Client code testing: OFF
+-- Blowfish cipher support: OFF
+-- PKCS #11 URI support: OFF
+-- DSA support: OFF
+-- Server code testing: OFF
+-- Public API documentation generation
+-- Benchmarks: OFF
+-- Symbol versioning: OFF
+-- Allow ABI break: OFF
+-- Release is final: 
+-- Global client config: /etc/ssh/ssh_config
+-- ********************************************
+-- Configuring done (2.2s)
+-- Generating done (3.1s)
+-- Build files have been written to: /mnt/d/SyncWork/CodeSpace/mscp/build
+make -C build
+make[1]: Entering directory '/mnt/d/SyncWork/CodeSpace/mscp/build'
+make[2]: Entering directory '/mnt/d/SyncWork/CodeSpace/mscp/build'
+make[3]: Entering directory '/mnt/d/SyncWork/CodeSpace/mscp/build'
+make[3]: Leaving directory '/mnt/d/SyncWork/CodeSpace/mscp/build'
+make[3]: Entering directory '/mnt/d/SyncWork/CodeSpace/mscp/build'
+make[3]: Leaving directory '/mnt/d/SyncWork/CodeSpace/mscp/build'
+[ 80%] Built target ssh-static
+make[3]: Entering directory '/mnt/d/SyncWork/CodeSpace/mscp/build'
+make[3]: Leaving directory '/mnt/d/SyncWork/CodeSpace/mscp/build'
+make[3]: Entering directory '/mnt/d/SyncWork/CodeSpace/mscp/build'
+[ 82%] Building C object CMakeFiles/mscp-static.dir/src/mscp.c.o
+make[3]: Leaving directory '/mnt/d/SyncWork/CodeSpace/mscp/build'
+make[2]: Leaving directory '/mnt/d/SyncWork/CodeSpace/mscp/build'
+make[1]: Leaving directory '/mnt/d/SyncWork/CodeSpace/mscp/build'

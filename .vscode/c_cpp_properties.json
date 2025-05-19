@@ -1,0 +1,21 @@
+{
+    "configurations": [
+        {
+            "name": "WSL",
+            "compileCommands": "${workspaceFolder}/compile_commands.json",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "/usr/include/**"
+            ],
+            "defines": [],
+            "compilerPath": "/usr/bin/gcc",
+            "cStandard": "c11",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "linux-gcc-x64",
+            "compilerArgs": [
+                "-Wno-unused-command-line-argument"
+            ]
+        }
+    ],
+    "version": 4
+}

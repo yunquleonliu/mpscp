@@ -401,6 +401,15 @@ int main(int argc, char **argv)
 			break;
 		case 'D':
 			dryrun = true;
+			/* --device option for specifying network devices */
+			if (optarg) {
+				char *devices = strdup(optarg);
+				if (!devices) {
+					pr_err("strdup: %s", strerrno());
+					return 1;
+				}
+				o.netdev = devices;
+			}
 			break;
 		case 'r':
 			/* for compatibility with scp */
@@ -409,7 +418,7 @@ int main(int argc, char **argv)
 			s.login_name = optarg;
 			break;
 		case 'P':
-			s.port = optarg;
+			s.port = atoi(optarg);
 			break;
 		case 'F':
 			s.config = optarg;
@@ -695,7 +704,7 @@ void print_progress_bar(double percent, char *suffix)
 	}
 
 	print_cli("\r\033[K"
-		  "%s%s",
+		  "%s%s\n",
 		  buf, suffix);
 }
 
@@ -758,8 +767,8 @@ void print_stat(bool final)
 	gettimeofday(&x.after, NULL);
 	if (calculate_timedelta(&x.before, &x.after) > 1 || final) {
 		mscp_get_stats(m, &s);
-		x.total = s.total;
-		x.done = s.done;
+		x.total = s.total_bytes;
+		x.done = s.done_bytes;
 		print_progress(!final ? &x.before : &x.start, &x.after, x.total,
 			       !final ? x.last : 0, x.done, final);
 		x.before = x.after;

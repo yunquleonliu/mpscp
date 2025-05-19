@@ -1,14 +1,27 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
+#define _GNU_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#define _XOPEN_SOURCE 700
+
+#include <stddef.h>  /* for size_t and NULL */
+#include <features.h>
+#include <stdlib.h>
 #include <stdbool.h>
 #include <unistd.h>
 #include <math.h>
 #include <pthread.h>
 #include <semaphore.h>
 #include <sys/time.h>
+#include <time.h>
+#include <sched.h>
+#include <net/if.h>  /* 添加 if_nametoindex 的声明 */
+#include <string.h>
+#include <errno.h>
 
 #include <pool.h>
 #include <minmax.h>
 #include <ssh.h>
+#include <libssh/sftp.h>
 #include <path.h>
 #include <checkpoint.h>
 #include <fileops.h>
@@ -18,60 +31,24 @@
 #include <strerrno.h>
 #include <mscp.h>
 #include <bwlimit.h>
+#include <netdev.h>
 
 #include <openbsd-compat/openbsd-compat.h>
 
-struct mscp_thread {
-	struct mscp *m;
-	sftp_session sftp;
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#include <pthread.h>
+#include <semaphore.h>
+#include <sys/time.h>
+#endif
 
-	/* attributes used by copy threads */
-	size_t copied_bytes;
-	int id;
-	int cpu;
-
-	/* thread-specific values */
-	pthread_t tid;
-	int ret;
-};
-
-struct mscp {
-	char *remote; /* remote host (and uername) */
-	int direction; /* copy direction */
-	char dst_path[PATH_MAX];
-
-	struct mscp_opts *opts;
-	struct mscp_ssh_opts *ssh_opts;
-
-	int *cores; /* usable cpu cores by COREMASK */
-	int nr_cores; /* length of array of cores */
-
-	sem_t *sem; /* semaphore for concurrent  connecting ssh sessions */
-
-	sftp_session first; /* first sftp session */
-
-	pool *src_pool, *path_pool, *chunk_pool, *thread_pool;
-
-	size_t total_bytes; /* total_bytes to be copied */
-	bool chunk_pool_ready;
-#define chunk_pool_is_ready(m) ((m)->chunk_pool_ready)
-#define chunk_pool_set_ready(m, b) ((m)->chunk_pool_ready = b)
-
-	struct bwlimit bw; /* bandwidth limit mechanism */
-
-	struct mscp_thread scan; /* mscp_thread for mscp_scan_thread() */
-};
+static void wait_for_interval(int interval);
 
 #define DEFAULT_MIN_CHUNK_SZ (16 << 20) /* 16MB */
 #define DEFAULT_NR_AHEAD 32
 #define DEFAULT_BUF_SZ 16384
-/* XXX: we use 16384 byte buffer pointed by
- * https://api.libssh.org/stable/libssh_tutor_sftp.html. The larget
- * read length from sftp_async_read is 65536 byte. Read sizes larger
- * than 65536 cause a situation where data remainds but
- * sftp_async_read returns 0.
- */
-
 #define DEFAULT_MAX_STARTUPS 8
 
 #define non_null_string(s) (s[0] != '\0')
@@ -216,19 +193,30 @@ struct mscp *mscp_init(struct mscp_opts *o, struct mscp_ssh_opts *s)
 	struct mscp *m;
 	int n;
 
-	set_print_severity(o->severity);
-
-	if (validate_and_set_defaut_params(o) < 0) {
+	if (!o || !s) {
+		priv_set_err("invalid arguments");
 		return NULL;
 	}
 
-	if (!(m = malloc(sizeof(*m)))) {
-		priv_set_errv("malloc: %s", strerrno());
+	if (!(m = calloc(1, sizeof(*m)))) {
+		priv_set_errv("calloc: %s", strerrno());
 		return NULL;
 	}
-	memset(m, 0, sizeof(*m));
+
 	m->opts = o;
 	m->ssh_opts = s;
+
+	/* 分配线程数组 */
+	if (o->nr_threads > 0) {
+		m->threads = calloc(o->nr_threads, sizeof(pthread_t));
+		if (!m->threads) {
+			priv_set_errv("calloc: %s", strerrno());
+			free(m);
+			return NULL;
+		}
+		m->nr_threads = o->nr_threads;
+	}
+
 	chunk_pool_set_ready(m, false);
 
 	if (!(m->src_pool = pool_new())) {
@@ -354,10 +342,28 @@ static void mscp_stop_scan_thread(struct mscp *m)
 		pthread_cancel(m->scan.tid);
 }
 
-void mscp_stop(struct mscp *m)
+int mscp_stop(struct mscp *m)
 {
+	int i;
+
+	if (!m)
+		return -1;
+
+	/* 等待所有线程结束 */
+	if (m->threads) {
+		for (i = 0; i < m->nr_threads; i++) {
+			if (m->threads[i]) {
+				pthread_join(m->threads[i], NULL);
+			}
+		}
+		free(m->threads);
+		m->threads = NULL;
+	}
+
 	mscp_stop_scan_thread(m);
 	mscp_stop_copy_thread(m);
+	
+	return 0;
 }
 
 void *mscp_scan_thread(void *arg)
@@ -512,165 +518,83 @@ int mscp_checkpoint_save(struct mscp *m, const char *pathname)
 			       m->path_pool, m->chunk_pool);
 }
 
-static void *mscp_copy_thread(void *arg);
-
-static struct mscp_thread *mscp_copy_thread_spawn(struct mscp *m, int id)
-{
-	struct mscp_thread *t;
-	int ret;
-
-	if (!(t = malloc(sizeof(*t)))) {
-		priv_set_errv("malloc: %s", strerrno());
-		return NULL;
-	}
-
-	memset(t, 0, sizeof(*t));
-	t->m = m;
-	t->id = id;
-	if (m->cores == NULL)
-		t->cpu = -1; /* not pinned to cpu */
-	else
-		t->cpu = m->cores[id % m->nr_cores];
-
-	if ((ret = pthread_create(&t->tid, NULL, mscp_copy_thread, t)) < 0) {
-		priv_set_errv("pthread_create: %d", ret);
-		free(t);
-		return NULL;
-	}
-
-	return t;
-}
-
-int mscp_start(struct mscp *m)
-{
-	struct mscp_thread *t;
-	int n, ret = 0;
-
-	if ((n = pool_size(m->chunk_pool)) < m->opts->nr_threads) {
-		pr_notice("we have %d chunk(s), set number of connections to %d", n, n);
-		m->opts->nr_threads = n;
-	}
-
-	for (n = 0; n < m->opts->nr_threads; n++) {
-		t = mscp_copy_thread_spawn(m, n);
-		if (!t)
-			break;
-		if (pool_push_lock(m->thread_pool, t) < 0) {
-			priv_set_errv("pool_push_lock: %s", strerrno());
-			break;
-		}
-	}
-
-	return n;
-}
-
-int mscp_join(struct mscp *m)
-{
-	struct mscp_thread *t;
-	struct path *p;
-	unsigned int idx;
-	size_t total_copied_bytes = 0, nr_copied = 0, nr_tobe_copied = 0;
-	int n, ret = 0;
-
-	/* waiting for scan thread joins... */
-	ret = mscp_scan_join(m);
-
-	/* waiting for copy threads join... */
-	pool_for_each(m->thread_pool, t, idx) {
-		pthread_join(t->tid, NULL);
-	}
-
-	pool_for_each(m->thread_pool, t, idx) {
-		total_copied_bytes += t->copied_bytes;
-		if (t->ret != 0)
-			ret = t->ret;
-		if (t->sftp) {
-			ssh_sftp_close(t->sftp);
-			t->sftp = NULL;
-		}
-	}
-
-	/* count up number of transferred files */
-	pool_iter_for_each(m->path_pool, p) {
-		nr_tobe_copied++;
-		if (p->state == FILE_STATE_DONE) {
-			nr_copied++;
-		}
-	}
-
-	if (m->first) {
-		ssh_sftp_close(m->first);
-		m->first = NULL;
-	}
-
-	pr_notice("%lu/%lu bytes copied for %lu/%lu files", total_copied_bytes,
-		  m->total_bytes, nr_copied, nr_tobe_copied);
-
-	return ret;
-}
-
-/* copy thread-related functions */
-
-static void wait_for_interval(int interval)
-{
-	_Atomic static long next;
-	struct timeval t;
-	long now;
-
-	gettimeofday(&t, NULL);
-	now = t.tv_sec * 1000000 + t.tv_usec;
-
-	if (next - now > 0)
-		usleep(next - now);
-
-	next = now + interval * 1000000;
-}
-
-void *mscp_copy_thread(void *arg)
+static void *mscp_copy_thread(void *arg)
 {
 	sftp_session src_sftp, dst_sftp;
 	struct mscp_thread *t = arg;
 	struct mscp *m = t->m;
 	struct chunk *c;
 	bool next_chunk_exist;
+	const char *netdev;
 
-	/* when error occurs, each thread prints error messages
-	 * immediately with pr_* functions. */
+	pr_notice("Thread[%d]: Starting copy thread", t->id);
 
 	if (t->cpu > -1) {
 		if (set_thread_affinity(pthread_self(), t->cpu) < 0) {
-			pr_err("set_thread_affinity: %s", priv_get_err());
+			pr_err("Thread[%d]: Failed to set thread affinity to CPU %d: %s", 
+				  t->id, t->cpu, priv_get_err());
 			goto err_out;
 		}
-		pr_notice("thread[%d]: pin to cpu core %d", t->id, t->cpu);
+		pr_notice("Thread[%d]: Successfully pinned to CPU core %d", t->id, t->cpu);
 	}
 
 	if (sem_wait(m->sem) < 0) {
-		pr_err("sem_wait: %s", strerrno());
+		pr_err("Thread[%d]: sem_wait failed: %s", t->id, strerrno());
 		goto err_out;
 	}
 
 	if ((next_chunk_exist = pool_iter_has_next_lock(m->chunk_pool))) {
 		if (m->opts->interval > 0)
 			wait_for_interval(m->opts->interval);
-		pr_notice("thread[%d]: connecting to %s", t->id, m->remote);
+		pr_notice("Thread[%d]: Connecting to %s", t->id, m->remote);
 		t->sftp = ssh_init_sftp_session(m->remote, m->ssh_opts);
+		
+		/* Bind socket to network device */
+		if (t->sftp) {
+			socket_t sock = ssh_get_fd(sftp_ssh(t->sftp));
+			if (sock < 0) {
+				pr_err("Thread[%d]: Failed to get socket fd", t->id);
+				goto err_out;
+			}
+
+			/* 使用线程ID作为索引来获取网络设备 */
+			netdev = get_netdev_by_index(t->id % get_netdev_count());
+			if (!netdev) {
+				pr_err("Thread[%d]: Network device not found for index %d", 
+					  t->id, t->id % get_netdev_count());
+				goto err_out;
+			}
+
+			if (bind_socket_to_netdev(sock, netdev) < 0) {
+				pr_err("Thread[%d]: Failed to bind to network device %s (errno: %d)", 
+					  t->id, netdev, errno);
+				goto err_out;
+			}
+			pr_notice("Thread[%d]: Successfully bound to network device %s", 
+					 t->id, netdev);
+		} else {
+			pr_err("Thread[%d]: SFTP session not initialized", t->id);
+			goto err_out;
+		}
 	}
 
 	if (sem_post(m->sem) < 0) {
-		pr_err("sem_post: %s", strerrno());
+		pr_err("Thread[%d]: sem_post failed: %s", t->id, strerrno());
 		goto err_out;
 	}
 
 	if (!next_chunk_exist) {
-		pr_notice("thread[%d]: no more connections needed", t->id);
+		pr_notice("Thread[%d]: No more connections needed", t->id);
 		goto out;
 	}
 
 	if (!t->sftp) {
-		pr_err("thread[%d]: %s", t->id, priv_get_err());
+		pr_err("Thread[%d]: SFTP session initialization failed: %s", 
+			  t->id, priv_get_err());
 		goto err_out;
 	}
+
+	pr_notice("Thread[%d]: Starting file transfer", t->id);
 
 	switch (m->direction) {
 	case MSCP_DIRECTION_L2R:
@@ -704,7 +628,7 @@ void *mscp_copy_thread(void *arg)
 	}
 
 	if (t->ret < 0) {
-		pr_err("thread[%d]: copy failed: %s -> %s, 0x%010lx-0x%010lx, %s", t->id,
+		pr_err("Thread[%d]: copy failed: %s -> %s, 0x%010lx-0x%010lx, %s", t->id,
 		       c->p->path, c->p->dst_path, c->off, c->off + c->len,
 		       priv_get_err());
 	}
@@ -736,6 +660,9 @@ void mscp_cleanup(struct mscp *m)
 
 void mscp_free(struct mscp *m)
 {
+	if (!m)
+		return;
+
 	pool_destroy(m->src_pool, free);
 	pool_destroy(m->path_pool, (pool_map_f)free_path);
 
@@ -753,10 +680,85 @@ void mscp_get_stats(struct mscp *m, struct mscp_stats *s)
 	struct mscp_thread *t;
 	unsigned int idx;
 
-	s->total = m->total_bytes;
-	s->done = 0;
+	s->total_bytes = m->total_bytes;
+	s->done_bytes = 0;
 
 	pool_for_each(m->thread_pool, t, idx) {
-		s->done += t->copied_bytes;
+		s->done_bytes += t->copied_bytes;
 	}
+}
+
+static void wait_for_interval(int interval)
+{
+	if (interval > 0) {
+		pr_notice("Waiting for %d seconds before establishing connection", interval);
+		sleep(interval);
+	}
+}
+
+int mscp_start(struct mscp *m)
+{
+	struct netdev_list *list;
+	int i, ret;
+
+	if (!m) {
+		pr_err("invalid arguments");
+		return -1;
+	}
+
+	list = get_netdev_list(m);
+	if (!list) {
+		pr_err("get_netdev_list: %s", strerrno());
+		return -1;
+	}
+
+	if (list->nr_devs == 0) {
+		pr_err("no network devices available");
+		free_netdev_list(list);
+		return -1;
+	}
+
+	/* 根据设备数量设置线程数 */
+	if (m->opts->nr_threads == 0) {
+		m->opts->nr_threads = list->nr_devs;
+	}
+
+	/* 为每个设备创建线程 */
+	for (i = 0; i < list->nr_devs; i++) {
+		ret = pthread_create(&m->threads[i], NULL, mscp_copy_thread, m);
+		if (ret) {
+			pr_err("pthread_create: %s", strerror(ret));
+			goto err;
+		}
+	}
+
+	free_netdev_list(list);
+	return 0;
+
+err:
+	free_netdev_list(list);
+	return -1;
+}
+
+int mscp_join(struct mscp *m)
+{
+	struct mscp_thread *t;
+	unsigned int idx;
+	int ret = 0;
+
+	/* join scan thread */
+	if (mscp_scan_join(m) < 0)
+		ret = -1;
+
+	/* join copy threads */
+	pool_for_each(m->thread_pool, t, idx) {
+		if (t->tid) {
+			pthread_join(t->tid, NULL);
+			t->tid = 0;
+			if (t->ret < 0)
+				ret = -1;
+		}
+	}
+
+	return ret;
 }

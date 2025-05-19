@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.13)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 file (STRINGS "VERSION" MSCP_VERSION)
 
@@ -28,7 +29,15 @@ endif()
 
 include(GNUInstallDirs)
 
-set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -DDEBUG")
+# Set default build type to Debug if not specified
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Debug)
+endif()
+
+# Add -g to CMAKE_C_FLAGS_DEBUG
+set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -g")
+set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g") # If you have C++ code
+
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake/modules)
 
 if(APPLE)
@@ -110,7 +119,7 @@ list(APPEND MSCP_BUILD_INCLUDE_DIRS ${CMAKE_CURRENT_BINARY_DIR}/include)
 set(LIBMSCP_SRC
 	src/mscp.c src/ssh.c src/fileops.c src/path.c src/checkpoint.c
 	src/bwlimit.c src/platform.c src/print.c src/pool.c src/strerrno.c
-	${OPENBSD_COMPAT_SRC})
+	src/netdev.c ${OPENBSD_COMPAT_SRC})
 add_library(mscp-static STATIC ${LIBMSCP_SRC})
 target_include_directories(mscp-static
 	PRIVATE ${MSCP_BUILD_INCLUDE_DIRS} ${mscp_SOURCE_DIR}/include)
